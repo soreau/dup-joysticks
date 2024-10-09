@@ -73,21 +73,8 @@ struct joystick {
 	struct ff_effect rumble_effect;
 };
 
-static int js_id = 0;
 static int num_josyticks = 0;
 static struct joystick joysticks[MAX_JOYSTICKS];
-
-void signal_handler(int signum)
-{
-	close(epollfd);
-	udev_unref(udev);
-	for (int i = 0; i < num_josyticks; i++) {
-		close(joysticks[i].uinput_fd);
-		close(joysticks[i].fd);
-		free(joysticks[i].axis);
-		free(joysticks[i].button);
-	}
-}
 
 static void emit(int fd, int type, int code, int val)
 {
@@ -103,33 +90,33 @@ static void emit(int fd, int type, int code, int val)
 	write(fd, &ie, sizeof(ie));
 }
 
-static int drop_permissions(void)
-{
-    if ((getuid() != geteuid()) || (getgid() != getegid()))
-    {
-        // Set the gid and uid in the correct order.
-        if ((setgid(getgid()) != 0) || (setuid(getuid()) != 0))
-        {
-            printf("Unable to drop root, refusing to start\n");
-
-            return 0;
-        }
-    }
-
-    if ((setgid(0) != -1) || (setuid(0) != -1))
-    {
-        printf("Unable to drop root (we shouldn't be able to "
-             "restore it after setuid), refusing to start\n");
-
-        return 0;
-    }
-
-    return 1;
-}
+//static int drop_permissions(void)
+//{
+//    if ((getuid() != geteuid()) || (getgid() != getegid()))
+//    {
+//        // Set the gid and uid in the correct order.
+//        if ((setgid(getgid()) != 0) || (setuid(getuid()) != 0))
+//        {
+//            printf("Unable to drop root, refusing to start\n");
+//
+//            return 0;
+//        }
+//    }
+//
+//    if ((setgid(0) != -1) || (setuid(0) != -1))
+//    {
+//        printf("Unable to drop root (we shouldn't be able to "
+//             "restore it after setuid), refusing to start\n");
+//
+//        return 0;
+//    }
+//
+//    return 1;
+//}
 
 void add_joystick(struct udev_device *dev)
 {
-	if (js_id >= MAX_JOYSTICKS) {
+	if (num_josyticks >= MAX_JOYSTICKS) {
 		printf("10 joysticks maximum\n");
 		return;
 	}
@@ -140,6 +127,7 @@ void add_joystick(struct udev_device *dev)
 		return;
 	}
 	printf("Device Node Path: %s\n", device_node_name);
+	int js_slot;
 	struct joystick *js_dev = NULL;
 	struct udev_list_entry *properties = udev_device_get_properties_list_entry(dev);
 	while (properties) {
@@ -153,7 +141,7 @@ void add_joystick(struct udev_device *dev)
 		}
 		if (!strcmp(property_name, "ID_PATH")) {
 			if (!strncmp(device_node_name, "/dev/input/js", strlen("/dev/input/js"))) {
-				for (int i = 0; i <= js_id; i++) {
+				for (int i = 0; i <= MAX_JOYSTICKS; i++) {
 					if (!joysticks[i].node_name && !joysticks[i].event_node_name) {
 						joysticks[i].node_name = strdup(device_node_name);
 						joysticks[i].id_path = strdup(property_value);
@@ -162,11 +150,12 @@ void add_joystick(struct udev_device *dev)
 						joysticks[i].node_name = strdup(device_node_name);
 						joysticks[i].id_path = strdup(property_value);
 						js_dev = &joysticks[i];
+						js_slot = i;
 						break;
 					}
 				}
 			} else if (!strncmp(device_node_name, "/dev/input/event", strlen("/dev/input/event"))) {
-				for (int i = 0; i <= js_id; i++) {
+				for (int i = 0; i <= MAX_JOYSTICKS; i++) {
 					if (!joysticks[i].event_node_name && !joysticks[i].node_name) {
 						joysticks[i].event_node_name = strdup(device_node_name);
 						joysticks[i].event_id_path = strdup(property_value);
@@ -175,6 +164,7 @@ void add_joystick(struct udev_device *dev)
 						joysticks[i].event_node_name = strdup(device_node_name);
 						joysticks[i].event_id_path = strdup(property_value);
 						js_dev = &joysticks[i];
+						js_slot = i;
 						break;
 					}
 				}
@@ -305,18 +295,18 @@ void add_joystick(struct udev_device *dev)
 	usetup.id.version = (ushort) 0x123;
 	usetup.ff_effects_max = max_ff_effects;
 	char *js_name;
-	int size = asprintf(&js_name, "Wayland Joystick %d", js_id);
+	int size = asprintf(&js_name, "Wayland Joystick %d", js_slot);
 	strcpy(usetup.name, js_name);
 	free(js_name);
 	ioctl(js_dev->uinput_fd, UI_DEV_SETUP, &usetup);
 	ioctl(js_dev->uinput_fd, UI_DEV_CREATE);
-	printf("Successfully added wayland joystick %d: %s\n", js_id, js_dev->event_node_name);
-	js_id++;
+	printf("Successfully added wayland joystick %d: %s\n", js_slot, js_dev->event_node_name);
+	num_josyticks++;
 }
 
 void remove_joystick(const char *node_name)
 {
-	for (int i = 0; i < num_josyticks; i++) {
+	for (int i = 0; i < MAX_JOYSTICKS; i++) {
 		if (!strcmp(node_name, joysticks[i].node_name)) {
 			printf("Removing %s\n", node_name);
 			printf("EPOLL_CTL_DEL %d\n", joysticks[i].fd);
@@ -341,7 +331,19 @@ void remove_joystick(const char *node_name)
 			joysticks[i].event_node_name = NULL;
 			free(joysticks[i].axis);
 			free(joysticks[i].button);
+			num_josyticks--;
 			break;
+		}
+	}
+}
+
+void signal_handler(int signum)
+{
+	close(epollfd);
+	udev_unref(udev);
+	for (int i = 0; i < num_josyticks; i++) {
+		if (joysticks[i].node_name) {
+			remove_joystick(joysticks[i].node_name);
 		}
 	}
 }
@@ -381,11 +383,10 @@ int main (void)
 		add_joystick(dev);
 		udev_device_unref(dev);
 	}
-	printf("Dropping permissions..\n");
-	if (!drop_permissions()) {
-		exit(-1);
-	}
-	num_josyticks = js_id;
+	//printf("Dropping permissions..\n");
+	//if (!drop_permissions()) {
+	//	exit(-1);
+	//}
 
 	udev_enumerate_unref(enumerate);
 
