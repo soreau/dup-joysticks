@@ -64,6 +64,7 @@ struct joystick {
 	int uinput_fd;
 	char *id_path, *event_id_path;
 	char *node_name, *event_node_name;
+	mode_t orig_mode, event_orig_mode;
 	unsigned char axes;
 	unsigned char buttons;
 	int *axis;
@@ -90,31 +91,7 @@ static void emit(int fd, int type, int code, int val)
 	write(fd, &ie, sizeof(ie));
 }
 
-//static int drop_permissions(void)
-//{
-//    if ((getuid() != geteuid()) || (getgid() != getegid()))
-//    {
-//        // Set the gid and uid in the correct order.
-//        if ((setgid(getgid()) != 0) || (setuid(getuid()) != 0))
-//        {
-//            printf("Unable to drop root, refusing to start\n");
-//
-//            return 0;
-//        }
-//    }
-//
-//    if ((setgid(0) != -1) || (setuid(0) != -1))
-//    {
-//        printf("Unable to drop root (we shouldn't be able to "
-//             "restore it after setuid), refusing to start\n");
-//
-//        return 0;
-//    }
-//
-//    return 1;
-//}
-
-void add_joystick(struct udev_device *dev)
+static void add_joystick(struct udev_device *dev)
 {
 	if (num_josyticks >= MAX_JOYSTICKS) {
 		printf("10 joysticks maximum\n");
@@ -180,14 +157,14 @@ void add_joystick(struct udev_device *dev)
 	struct uinput_setup usetup;
 
 	struct stat st;
-	mode_t mode, add_rw_perms, remove_rw_perms;
+	mode_t add_rw_perms, remove_rw_perms;
 
 	stat(js_dev->node_name, &st);
 
-	mode = st.st_mode & 0xFFF;
+	js_dev->orig_mode = st.st_mode & 0xFFF;
 
-	add_rw_perms = mode | S_IRUSR | S_IRGRP;
-	remove_rw_perms = mode & ~(S_IRUSR | S_IRGRP | S_IROTH);
+	add_rw_perms = js_dev->orig_mode | S_IRUSR | S_IRGRP;
+	remove_rw_perms = js_dev->orig_mode & ~(S_IRUSR | S_IRGRP | S_IROTH);
 
 	chmod(js_dev->node_name, add_rw_perms);
 	int js_fd = open(js_dev->node_name, O_RDONLY);
@@ -206,10 +183,10 @@ void add_joystick(struct udev_device *dev)
 
 	stat(js_dev->event_node_name, &st);
 
-	mode = st.st_mode & 0xFFF;
+	js_dev->event_orig_mode = st.st_mode & 0xFFF;
 
-	add_rw_perms = mode | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP;
-	remove_rw_perms = mode & ~(S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
+	add_rw_perms = js_dev->event_orig_mode | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP;
+	remove_rw_perms = js_dev->event_orig_mode & ~(S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
 
 	chmod(js_dev->event_node_name, add_rw_perms);
 	js_dev->event_fd = open(js_dev->event_node_name, O_RDWR);
@@ -304,48 +281,60 @@ void add_joystick(struct udev_device *dev)
 	num_josyticks++;
 }
 
-void remove_joystick(const char *node_name)
+static void remove_joystick(const char *node_name)
 {
+	struct joystick *js_dev = NULL;
 	for (int i = 0; i < MAX_JOYSTICKS; i++) {
-		if (!strcmp(node_name, joysticks[i].node_name)) {
-			printf("Removing %s\n", node_name);
-			printf("EPOLL_CTL_DEL %d\n", joysticks[i].fd);
-			if (epoll_ctl(epollfd, EPOLL_CTL_DEL, joysticks[i].fd, NULL) == -1) {
-				printf("epoll_ctl: Failed to remove joystick from epoll\n");
-				exit(-1);
-			}
-			printf("EPOLL_CTL_DEL %d\n", joysticks[i].fd);
-			if (epoll_ctl(epollfd, EPOLL_CTL_DEL, joysticks[i].uinput_fd, NULL) == -1) {
-				printf("epoll_ctl: Failed to remove uinput joystick from epoll\n");
-				exit(-1);
-			}
-			ioctl(joysticks[i].uinput_fd, UI_DEV_DESTROY);
-			close(joysticks[i].uinput_fd);
-			joysticks[i].uinput_fd = -1;
-			joysticks[i].fd = -1;
-			free(joysticks[i].node_name);
-			joysticks[i].node_name = NULL;
-			close(joysticks[i].event_fd);
-			joysticks[i].event_fd = -1;
-			free(joysticks[i].event_node_name);
-			joysticks[i].event_node_name = NULL;
-			free(joysticks[i].axis);
-			free(joysticks[i].button);
-			num_josyticks--;
-			break;
+		if (joysticks[i].node_name && !strcmp(node_name, joysticks[i].node_name)) {
+			js_dev = &joysticks[i];
 		}
 	}
+	if (!js_dev) {
+		return;
+	}
+	printf("Removing %s\n", js_dev->node_name);
+	printf("EPOLL_CTL_DEL %d\n", js_dev->fd);
+	if (epoll_ctl(epollfd, EPOLL_CTL_DEL, js_dev->fd, NULL) == -1) {
+		printf("epoll_ctl: Failed to remove joystick from epoll\n");
+		exit(-1);
+	}
+	printf("EPOLL_CTL_DEL %d\n", js_dev->uinput_fd);
+	if (epoll_ctl(epollfd, EPOLL_CTL_DEL, js_dev->uinput_fd, NULL) == -1) {
+		printf("epoll_ctl: Failed to remove uinput joystick from epoll\n");
+		exit(-1);
+	}
+	ioctl(js_dev->uinput_fd, UI_DEV_DESTROY);
+	close(js_dev->uinput_fd);
+	js_dev->uinput_fd = -1;
+	fchmod(js_dev->fd, js_dev->orig_mode);
+	close(js_dev->fd);
+	js_dev->fd = -1;
+	free(js_dev->node_name);
+	js_dev->node_name = NULL;
+	fchmod(js_dev->event_fd, js_dev->event_orig_mode);
+	close(js_dev->event_fd);
+	js_dev->event_fd = -1;
+	free(js_dev->event_node_name);
+	js_dev->event_node_name = NULL;
+	free(js_dev->axis);
+	free(js_dev->button);
+	num_josyticks--;
 }
 
-void signal_handler(int signum)
+static void free_resources()
 {
-	close(epollfd);
-	udev_unref(udev);
-	for (int i = 0; i < num_josyticks; i++) {
+	for (int i = 0; i < MAX_JOYSTICKS; i++) {
 		if (joysticks[i].node_name) {
 			remove_joystick(joysticks[i].node_name);
 		}
 	}
+	close(epollfd);
+	udev_unref(udev);
+}
+
+static void signal_handler(int signum)
+{
+	free_resources();
 }
 
 int main (void)
@@ -383,10 +372,6 @@ int main (void)
 		add_joystick(dev);
 		udev_device_unref(dev);
 	}
-	//printf("Dropping permissions..\n");
-	//if (!drop_permissions()) {
-	//	exit(-1);
-	//}
 
 	udev_enumerate_unref(enumerate);
 
@@ -416,11 +401,11 @@ int main (void)
 			if (events[n].data.fd == udev_mon_fd) {
 				struct udev_device *dev = udev_monitor_receive_device(mon);
 				if (dev) {
-					printf("Joystick hotplug:\n");
 					const char *node_name = udev_device_get_devnode(dev);
 					const char *dev_path = udev_device_get_devpath(dev);
 					const char *action = udev_device_get_action(dev);
 					if (node_name && !strstr(dev_path, "virtual") && udev_device_get_property_value(dev, "ID_INPUT_JOYSTICK")) {
+						printf("Joystick hotplug:\n");
 						printf("   Node: %s\n", node_name);
 						printf("   Subsystem: %s\n", udev_device_get_subsystem(dev));
 						printf("   Devtype: %s\n", udev_device_get_devtype(dev));
@@ -544,14 +529,8 @@ int main (void)
 			fflush(stdout);
 		}
 	}
-	close(epollfd);
-	udev_unref(udev);
-	for (int i = 0; i < num_josyticks; i++) {
-		close(joysticks[i].uinput_fd);
-		close(joysticks[i].fd);
-		free(joysticks[i].axis);
-		free(joysticks[i].button);
-	}
+
+	free_resources();
 
 	return 0;
 }
