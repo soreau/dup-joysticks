@@ -492,20 +492,20 @@ int main (void)
 			printf("\r");
 
 			if (js_dev->axes) {
+				emit(js_dev->uinput_fd, EV_ABS, ABS_X + js_dev->axmap[js.number], js_dev->axis[js.number]);
+				emit(js_dev->uinput_fd, EV_SYN, SYN_REPORT, 0);
 				printf("Axes: ");
 				for (int i = 0; i < js_dev->axes; i++) {
 					printf("%2d:%6d ", i, js_dev->axis[i]);
-					emit(js_dev->uinput_fd, EV_ABS, ABS_X + js_dev->axmap[i], js_dev->axis[i]);
-					emit(js_dev->uinput_fd, EV_SYN, SYN_REPORT, 0);
 				}
 			}
 
 			if (js_dev->buttons) {
+				emit(js_dev->uinput_fd, EV_KEY, js_dev->btnmap[js.number], js_dev->button[js.number]);
+				emit(js_dev->uinput_fd, EV_SYN, SYN_REPORT, 0);
 				printf("Buttons: ");
 				for (int i = 0; i < js_dev->buttons; i++) {
 					printf("%2d:%s ", i, js_dev->button[i] ? "on " : "off");
-					emit(js_dev->uinput_fd, EV_KEY, js_dev->btnmap[i], js_dev->button[i]);
-					emit(js_dev->uinput_fd, EV_SYN, SYN_REPORT, 0);
 					if (!i && js_dev->button[i]) {
 						struct input_event play;
 						memset(&play, 0, sizeof(play));
